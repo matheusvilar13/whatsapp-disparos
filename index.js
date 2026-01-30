@@ -1,0 +1,193 @@
+require("dotenv").config();
+const express = require("express");
+const axios = require("axios");
+const { Pool } = require("pg");
+
+const app = express();
+app.use(express.json());
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+function normalizePhoneBR(input) {
+  // Mantém só números
+  let digits = (input || "").replace(/\D/g, "");
+  // Se o usuário colocou 55, mantém. Se não, adiciona.
+  if (digits.startsWith("55")) return digits;
+  return "55" + digits;
+}
+
+async function sendTemplateMessage({ to, templateName, lang = "pt_BR", params = [] }) {
+  const url = `https://graph.facebook.com/${process.env.WA_API_VERSION}/${process.env.WA_PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: lang },
+      components: [
+        {
+          type: "body",
+          parameters: params.map((text) => ({ type: "text", text })),
+        },
+      ],
+    },
+  };
+
+  const res = await axios.post(url, payload, {
+    headers: {
+      Authorization: `Bearer ${process.env.WA_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  return res.data;
+}
+
+// 1) Captura lead: salva + manda boas-vindas
+app.post("/leads", async (req, res) => {
+  try {
+    const { name, phone, source } = req.body;
+    if (!name || !phone) {
+      return res.status(400).json({ error: "name e phone são obrigatórios" });
+    }
+
+    const phone_e164 = normalizePhoneBR(phone);
+
+    // salva/atualiza contato
+    const upsert = await pool.query(
+      `
+      insert into contacts (name, phone_e164, opt_in, opt_in_at, source)
+      values ($1, $2, true, now(), $3)
+      on conflict (phone_e164)
+      do update set name = excluded.name, opt_in = true, opt_in_at = now(), source = excluded.source
+      returning *
+      `,
+      [name, phone_e164, source || "pagina-captura"]
+    );
+
+    const contact = upsert.rows[0];
+
+    // manda template boas_vindas (precisa existir e estar aprovado)
+    const wa = await sendTemplateMessage({
+      to: contact.phone_e164,
+      templateName: "boas_vindas",
+      params: [contact.name, contact.source || "cadastro"],
+    });
+
+    // registra mensagem
+    await pool.query(
+      `
+      insert into messages (contact_id, status, wa_message_id, sent_at)
+      values ($1, $2, $3, now())
+      `,
+      [contact.id, "sent", wa.messages?.[0]?.id || null]
+    );
+
+    res.json({ ok: true, contact, wa });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: "erro ao salvar/enviar", details: err.response?.data || err.message });
+  }
+});
+
+// 2) Criar campanha
+app.post("/campaigns", async (req, res) => {
+  const { name, template_name, template_lang } = req.body;
+  if (!name || !template_name) return res.status(400).json({ error: "name e template_name são obrigatórios" });
+
+  const result = await pool.query(
+    `insert into campaigns (name, template_name, template_lang) values ($1, $2, $3) returning *`,
+    [name, template_name, template_lang || "pt_BR"]
+  );
+  res.json(result.rows[0]);
+});
+
+// 3) Disparar campanha para todos opt-in (MVP)
+app.post("/campaigns/:id/send", async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+
+    const camp = await pool.query(`select * from campaigns where id = $1`, [campaignId]);
+    if (camp.rowCount === 0) return res.status(404).json({ error: "campanha não encontrada" });
+    const campaign = camp.rows[0];
+
+    const contacts = await pool.query(`select * from contacts where opt_in = true`);
+    const sent = [];
+    const failed = [];
+
+    for (const c of contacts.rows) {
+      try {
+        const wa = await sendTemplateMessage({
+          to: c.phone_e164,
+          templateName: campaign.template_name,
+          lang: campaign.template_lang,
+          params: [c.name, c.source || "campanha", "https://seu-link-aqui.com"],
+        });
+
+        await pool.query(
+          `insert into messages (contact_id, campaign_id, status, wa_message_id, sent_at) values ($1,$2,$3,$4,now())`,
+          [c.id, campaign.id, "sent", wa.messages?.[0]?.id || null]
+        );
+
+        sent.push(c.phone_e164);
+
+        // controle simples de velocidade (1 msg/seg)
+        await new Promise((r) => setTimeout(r, 1000));
+      } catch (e) {
+        console.error("Falha envio:", c.phone_e164, e.response?.data || e.message);
+        failed.push(c.phone_e164);
+        await pool.query(
+          `insert into messages (contact_id, campaign_id, status, error) values ($1,$2,$3,$4)`,
+          [c.id, campaign.id, "failed", JSON.stringify(e.response?.data || e.message)]
+        );
+      }
+    }
+
+    res.json({ ok: true, total: contacts.rowCount, sent: sent.length, failed: failed.length, failed_list: failed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4) Webhook verification (GET)
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === process.env.WEBHOOK_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// 5) Webhook receiver (POST)
+app.post("/webhook", async (req, res) => {
+  try {
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0]?.value;
+
+    const messages = changes?.messages;
+    if (messages && messages.length) {
+      const msg = messages[0];
+      const from = msg.from; // número do usuário em formato e164 sem "+"
+      const text = msg.text?.body?.trim()?.toLowerCase();
+
+      if (text && ["sair", "parar", "cancelar", "stop"].includes(text)) {
+        await pool.query(`update contacts set opt_in = false where phone_e164 = $1`, [from]);
+      }
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error(err.message);
+    res.sendStatus(200);
+  }
+});
+
+app.get("/", (_, res) => res.send("API WhatsApp ok"));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`rodando em http://localhost:${PORT}`));

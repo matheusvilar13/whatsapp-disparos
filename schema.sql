@@ -1,0 +1,35 @@
+create extension if not exists "uuid-ossp";
+
+create table if not exists contacts (
+  id uuid primary key default uuid_generate_v4(),
+  name text not null,
+  phone_e164 text not null unique,
+  opt_in boolean not null default true,
+  opt_in_at timestamptz not null default now(),
+  source text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists campaigns (
+  id uuid primary key default uuid_generate_v4(),
+  name text not null,
+  template_name text not null,
+  template_lang text not null default 'pt_BR',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists messages (
+  id uuid primary key default uuid_generate_v4(),
+  contact_id uuid references contacts(id) on delete cascade,
+  campaign_id uuid references campaigns(id) on delete set null,
+  wa_message_id text,
+  status text not null default 'queued',
+  error text,
+  created_at timestamptz not null default now(),
+  sent_at timestamptz
+);
+
+create index if not exists idx_contacts_optin on contacts(opt_in);
+create index if not exists idx_messages_contact on messages(contact_id);
+create index if not exists idx_messages_status on messages(status);
+
