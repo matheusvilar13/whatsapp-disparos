@@ -5,6 +5,8 @@ const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static("public"));
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -166,6 +168,7 @@ app.get("/webhook", (req, res) => {
 // 5) Webhook receiver (POST)
 app.post("/webhook", async (req, res) => {
   try {
+    console.log("Webhook recebido:", JSON.stringify(req.body));
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0]?.value;
 

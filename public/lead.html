@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cadastro WhatsApp</title>
+    <style>
+      :root { color-scheme: light; }
+      body { font-family: Arial, sans-serif; margin: 24px; background: #f6f7fb; }
+      .card { max-width: 520px; margin: 0 auto; background: #fff; padding: 24px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+      h1 { font-size: 22px; margin: 0 0 12px; }
+      p { color: #555; margin: 0 0 20px; }
+      label { display: block; margin: 12px 0 6px; font-weight: 600; }
+      input[type="text"], input[type="tel"] { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; }
+      .consent { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0; font-size: 14px; }
+      button { width: 100%; padding: 12px; background: #0a7cff; color: #fff; border: 0; border-radius: 8px; font-weight: 700; cursor: pointer; }
+      button:disabled { opacity: 0.7; cursor: not-allowed; }
+      .status { margin-top: 14px; font-size: 14px; }
+      .ok { color: #0a7f3f; }
+      .err { color: #b00020; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Receba mensagens no WhatsApp</h1>
+      <p>Preencha os dados abaixo para confirmar seu cadastro.</p>
+      <form id="lead-form">
+        <label for="name">Nome</label>
+        <input id="name" name="name" type="text" placeholder="Seu nome" required />
+
+        <label for="phone">WhatsApp</label>
+        <input id="phone" name="phone" type="tel" placeholder="(11) 91234-5678" required />
+
+        <label class="consent">
+          <input id="consent" name="consent" type="checkbox" required />
+          <span>Concordo em receber mensagens no WhatsApp e posso cancelar a qualquer momento.</span>
+        </label>
+
+        <button id="submit" type="submit">Quero receber</button>
+        <div id="status" class="status"></div>
+      </form>
+    </div>
+
+    <script>
+      const form = document.getElementById("lead-form");
+      const statusEl = document.getElementById("status");
+      const submitBtn = document.getElementById("submit");
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        statusEl.textContent = "Enviando...";
+        statusEl.className = "status";
+        submitBtn.disabled = true;
+
+        const payload = {
+          name: form.name.value.trim(),
+          phone: form.phone.value.trim(),
+          source: "pagina-captura"
+        };
+
+        try {
+          const res = await fetch("/leads", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Falha ao enviar");
+
+          statusEl.textContent = "Cadastro realizado. Aguarde a mensagem no WhatsApp.";
+          statusEl.className = "status ok";
+          form.reset();
+        } catch (err) {
+          statusEl.textContent = "Erro: " + err.message;
+          statusEl.className = "status err";
+        } finally {
+          submitBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
