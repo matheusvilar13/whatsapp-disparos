@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dashboard WhatsApp</title>
+    <style>
+      :root { color-scheme: light; }
+      body { font-family: Arial, sans-serif; margin: 20px; background: #f6f7fb; }
+      .container { max-width: 1100px; margin: 0 auto; }
+      .card { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 6px 20px rgba(0,0,0,0.08); margin-bottom: 16px; }
+      h1 { font-size: 22px; margin: 0 0 8px; }
+      h2 { font-size: 18px; margin: 0 0 8px; }
+      label { display: block; margin: 8px 0 4px; font-weight: 600; }
+      input, select { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; }
+      .row { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+      button { padding: 10px 12px; border: 0; border-radius: 8px; cursor: pointer; font-weight: 700; }
+      .btn-primary { background: #0a7cff; color: #fff; }
+      .btn-warn { background: #f0ad4e; color: #fff; }
+      .btn-danger { background: #d9534f; color: #fff; }
+      .btn-ghost { background: #eee; color: #333; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; font-size: 14px; }
+      .status { margin-top: 8px; font-size: 14px; }
+      .ok { color: #0a7f3f; }
+      .err { color: #b00020; }
+      .muted { color: #666; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <h1>Dashboard WhatsApp</h1>
+        <p class="muted">Controle rápido de campanha, cupom e envio de links.</p>
+      </div>
+
+      <div class="card">
+        <h2>Configurações do Evento</h2>
+        <div class="row">
+          <div>
+            <label for="event_name">Nome do evento</label>
+            <input id="event_name" placeholder="Ex: Corrida de Domingo" />
+          </div>
+          <div>
+            <label for="coupon_code">Cupom (geral)</label>
+            <input id="coupon_code" placeholder="Ex: CORRIDA10" />
+          </div>
+          <div>
+            <label for="photos_link">Link das fotos</label>
+            <input id="photos_link" placeholder="https://fotosnoar.com.br" />
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn-primary" id="saveSettings">Salvar</button>
+          <button class="btn-warn" id="sendLink">Enviar link para opt-in</button>
+          <button class="btn-danger" id="resetAll">Reset (apagar contatos)</button>
+        </div>
+        <div id="settingsStatus" class="status"></div>
+      </div>
+
+      <div class="card">
+        <h2>Contatos</h2>
+        <div class="row">
+          <div>
+            <label for="q">Buscar (nome/telefone)</label>
+            <input id="q" placeholder="Ex: Matheus" />
+          </div>
+          <div>
+            <label for="opt_in">Opt-in</label>
+            <select id="opt_in">
+              <option value="">Todos</option>
+              <option value="true">Somente opt-in</option>
+              <option value="false">Somente opt-out</option>
+            </select>
+          </div>
+          <div>
+            <label for="campaign_id">Filtrar por campanha (ID)</label>
+            <input id="campaign_id" placeholder="UUID da campanha" />
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn-ghost" id="refreshContacts">Atualizar</button>
+        </div>
+        <div id="contactsStatus" class="status"></div>
+        <div style="overflow:auto; margin-top: 10px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Nome</th>
+                <th>WhatsApp</th>
+                <th>Opt-in</th>
+                <th>Cupom</th>
+                <th>Criado</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody id="contactsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const settingsStatus = document.getElementById("settingsStatus");
+      const contactsStatus = document.getElementById("contactsStatus");
+      const eventNameEl = document.getElementById("event_name");
+      const couponEl = document.getElementById("coupon_code");
+      const linkEl = document.getElementById("photos_link");
+      const qEl = document.getElementById("q");
+      const optInEl = document.getElementById("opt_in");
+      const campaignEl = document.getElementById("campaign_id");
+      const contactsBody = document.getElementById("contactsBody");
+
+      function setStatus(el, msg, ok = true) {
+        el.textContent = msg;
+        el.className = "status " + (ok ? "ok" : "err");
+      }
+
+      async function loadSettings() {
+        const res = await fetch("/admin/settings");
+        const data = await res.json();
+        eventNameEl.value = data.event_name || "";
+        couponEl.value = data.coupon_code || "";
+        linkEl.value = data.photos_link || "";
+      }
+
+      async function saveSettings() {
+        settingsStatus.textContent = "Salvando...";
+        const payload = {
+          event_name: eventNameEl.value.trim(),
+          coupon_code: couponEl.value.trim(),
+          photos_link: linkEl.value.trim(),
+        };
+        const res = await fetch("/admin/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          return setStatus(settingsStatus, err.error || "Erro ao salvar", false);
+        }
+        setStatus(settingsStatus, "Configurações salvas.");
+      }
+
+      async function sendLink() {
+        settingsStatus.textContent = "Enviando link para opt-in...";
+        const res = await fetch("/admin/send-link", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) return setStatus(settingsStatus, data.error || "Falha ao enviar", false);
+        setStatus(settingsStatus, `Link enfileirado para ${data.queued} contatos.`);
+      }
+
+      async function resetAll() {
+        if (!confirm("Tem certeza? Isso apaga todos os contatos e mensagens.")) return;
+        settingsStatus.textContent = "Resetando...";
+        const res = await fetch("/admin/reset", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) return setStatus(settingsStatus, data.error || "Falha no reset", false);
+        setStatus(settingsStatus, "Reset concluído.");
+        await loadContacts();
+      }
+
+      async function loadContacts() {
+        contactsStatus.textContent = "Carregando...";
+        const params = new URLSearchParams();
+        if (qEl.value.trim()) params.set("q", qEl.value.trim());
+        if (optInEl.value) params.set("opt_in", optInEl.value);
+        if (campaignEl.value.trim()) params.set("campaign_id", campaignEl.value.trim());
+
+        const res = await fetch(`/admin/contacts?${params.toString()}`);
+        const data = await res.json();
+        if (!res.ok) return setStatus(contactsStatus, data.error || "Erro ao carregar", false);
+
+        contactsBody.innerHTML = "";
+        data.forEach((c) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${c.name || ""}</td>
+            <td>${c.phone_e164 || ""}</td>
+            <td>${c.opt_in ? "sim" : "não"}</td>
+            <td>${c.coupon_status || ""}</td>
+            <td>${new Date(c.created_at).toLocaleString()}</td>
+            <td><button class="btn-danger" data-id="${c.id}">Remover</button></td>
+          `;
+          contactsBody.appendChild(tr);
+        });
+        setStatus(contactsStatus, `Total: ${data.length} contatos.`);
+
+        document.querySelectorAll("button[data-id]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const id = btn.getAttribute("data-id");
+            if (!confirm("Remover este contato?")) return;
+            const res = await fetch(`/admin/contacts/${id}`, { method: "DELETE" });
+            if (!res.ok) {
+              const err = await res.json();
+              return alert(err.error || "Erro ao remover");
+            }
+            await loadContacts();
+          });
+        });
+      }
+
+      document.getElementById("saveSettings").addEventListener("click", saveSettings);
+      document.getElementById("sendLink").addEventListener("click", sendLink);
+      document.getElementById("resetAll").addEventListener("click", resetAll);
+      document.getElementById("refreshContacts").addEventListener("click", loadContacts);
+
+      loadSettings();
+      loadContacts();
+    </script>
+  </body>
+</html>

@@ -52,6 +52,30 @@ function buildPhoneCandidatesBR(input) {
   return Array.from(candidates);
 }
 
+async function getSettings() {
+  const result = await pool.query(`select event_name, coupon_code, photos_link from app_settings where id = 1`);
+  if (result.rowCount > 0) return result.rows[0];
+  await pool.query(`insert into app_settings (id) values (1) on conflict (id) do nothing`);
+  const retry = await pool.query(`select event_name, coupon_code, photos_link from app_settings where id = 1`);
+  return retry.rows[0] || { event_name: null, coupon_code: null, photos_link: null };
+}
+
+async function updateSettings({ event_name, coupon_code, photos_link }) {
+  await pool.query(
+    `
+    insert into app_settings (id, event_name, coupon_code, photos_link, updated_at)
+    values (1, $1, $2, $3, now())
+    on conflict (id) do update
+    set event_name = excluded.event_name,
+        coupon_code = excluded.coupon_code,
+        photos_link = excluded.photos_link,
+        updated_at = now()
+    `,
+    [event_name || null, coupon_code || null, photos_link || null]
+  );
+  return getSettings();
+}
+
 async function sendTemplateMessage({ to, templateName, lang = "pt_BR", params = [] }) {
   const url = `https://graph.facebook.com/${process.env.WA_API_VERSION}/${process.env.WA_PHONE_NUMBER_ID}/messages`;
 
@@ -164,6 +188,112 @@ async function queuePollLoop() {
   }
 }
 
+// Admin: settings + contacts (public for now)
+app.get("/admin/settings", async (_, res) => {
+  try {
+    const settings = await getSettings();
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/admin/settings", async (req, res) => {
+  try {
+    const { event_name, coupon_code, photos_link } = req.body || {};
+    const updated = await updateSettings({ event_name, coupon_code, photos_link });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/contacts", async (req, res) => {
+  try {
+    const { opt_in, q, campaign_id } = req.query;
+    const params = [];
+    let where = "1=1";
+
+    if (opt_in === "true" || opt_in === "false") {
+      params.push(opt_in === "true");
+      where += ` and c.opt_in = $${params.length}`;
+    }
+
+    if (q) {
+      params.push(`%${q}%`);
+      where += ` and (c.name ilike $${params.length} or c.phone_e164 ilike $${params.length})`;
+    }
+
+    let query = `
+      select c.*
+      from contacts c
+      where ${where}
+      order by c.created_at desc
+      limit 500
+    `;
+
+    if (campaign_id) {
+      params.push(campaign_id);
+      query = `
+        select distinct c.*
+        from contacts c
+        join messages m on m.contact_id = c.id
+        where ${where} and m.campaign_id = $${params.length}
+        order by c.created_at desc
+        limit 500
+      `;
+    }
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/admin/contacts/:id", async (req, res) => {
+  try {
+    await pool.query(`delete from contacts where id = $1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/admin/send-link", async (_, res) => {
+  try {
+    const settings = await getSettings();
+    if (!settings?.photos_link) return res.status(400).json({ error: "photos_link não configurado" });
+    if (!settings?.event_name) return res.status(400).json({ error: "event_name não configurado" });
+
+    const contacts = await pool.query(`select * from contacts where opt_in = true`);
+    for (const c of contacts.rows) {
+      const params = [c.name, settings.event_name, settings.photos_link];
+      await pool.query(
+        `
+        insert into messages (contact_id, campaign_id, template_name, template_lang, params, status)
+        values ($1, null, $2, $3, $4, 'queued')
+        `,
+        [c.id, "link_fotos", "pt_BR", JSON.stringify(params)]
+      );
+    }
+
+    res.json({ ok: true, queued: contacts.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/admin/reset", async (_, res) => {
+  try {
+    await pool.query("delete from messages");
+    await pool.query("delete from contacts");
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 1) Captura lead: salva + manda boas-vindas
 app.post("/leads", async (req, res) => {
   try {
@@ -173,14 +303,16 @@ app.post("/leads", async (req, res) => {
     }
 
     const phone_e164 = normalizePhoneBR(phone);
+    const settings = await getSettings();
+    const eventName = settings?.event_name || "evento";
 
     // salva/atualiza contato
     const upsert = await pool.query(
       `
-      insert into contacts (name, phone_e164, opt_in, opt_in_at, source)
-      values ($1, $2, true, now(), $3)
+      insert into contacts (name, phone_e164, opt_in, opt_in_at, coupon_status, source)
+      values ($1, $2, true, now(), 'pending', $3)
       on conflict (phone_e164)
-      do update set name = excluded.name, opt_in = true, opt_in_at = now(), source = excluded.source
+      do update set name = excluded.name, opt_in = true, opt_in_at = now(), coupon_status = 'pending', source = excluded.source
       returning *
       `,
       [name, phone_e164, source || "pagina-captura"]
@@ -191,8 +323,8 @@ app.post("/leads", async (req, res) => {
     // manda template boas_vindas (precisa existir e estar aprovado)
     const wa = await sendTemplateMessage({
       to: contact.phone_e164,
-      templateName: "boas_vindas",
-      params: [contact.name, contact.source || "cadastro"],
+      templateName: "interesse_cupom",
+      params: [contact.name, eventName],
     });
 
     // registra mensagem
@@ -275,10 +407,30 @@ app.post("/webhook", async (req, res) => {
       const msg = messages[0];
       const from = msg.from; // número do usuário em formato e164 sem "+"
       const text = msg.text?.body?.trim()?.toLowerCase();
+      const buttonTitle = msg.interactive?.button_reply?.title?.trim()?.toLowerCase();
+      const isYes = buttonTitle && buttonTitle.startsWith("sim");
 
       if (text && ["sair", "parar", "cancelar", "stop"].includes(text)) {
         const candidates = buildPhoneCandidatesBR(from);
         await pool.query(`update contacts set opt_in = false where phone_e164 = any($1)`, [candidates]);
+        return res.sendStatus(200);
+      }
+
+      if (isYes) {
+        const candidates = buildPhoneCandidatesBR(from);
+        const settings = await getSettings();
+        const result = await pool.query(
+          `update contacts set coupon_status = 'accepted' where phone_e164 = any($1) returning name, phone_e164`,
+          [candidates]
+        );
+        const contactName = result.rows[0]?.name || changes?.contacts?.[0]?.profile?.name || "cliente";
+        if (settings?.coupon_code) {
+          await sendTemplateMessage({
+            to: result.rows[0]?.phone_e164 || from,
+            templateName: "envio_cupom",
+            params: [contactName, settings.coupon_code],
+          });
+        }
       }
     }
 

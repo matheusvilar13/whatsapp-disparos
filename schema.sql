@@ -6,6 +6,7 @@ create table if not exists contacts (
   phone_e164 text not null unique,
   opt_in boolean not null default true,
   opt_in_at timestamptz not null default now(),
+  coupon_status text not null default 'pending',
   source text,
   created_at timestamptz not null default now()
 );
@@ -38,3 +39,11 @@ create table if not exists messages (
 create index if not exists idx_contacts_optin on contacts(opt_in);
 create index if not exists idx_messages_contact on messages(contact_id);
 create index if not exists idx_messages_status on messages(status);
+
+create table if not exists app_settings (
+  id integer primary key default 1,
+  event_name text,
+  coupon_code text,
+  photos_link text,
+  updated_at timestamptz not null default now()
+);
