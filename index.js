@@ -18,6 +18,40 @@ function normalizePhoneBR(input) {
   return "55" + digits;
 }
 
+function buildPhoneCandidatesBR(input) {
+  const digits = (input || "").replace(/\D/g, "");
+  const candidates = new Set();
+  if (!digits) return [];
+
+  // Always keep the raw digits
+  candidates.add(digits);
+
+  // If missing country code, add it
+  if (!digits.startsWith("55")) {
+    candidates.add("55" + digits);
+  }
+
+  // Handle BR mobile extra '9' after DDD
+  // Example stored: 55 + DDD + 9 + 8digits (13 total)
+  // Incoming from webhook sometimes comes without the extra 9 (12 total)
+  if (digits.startsWith("55")) {
+    const ddd = digits.slice(2, 4);
+    const rest = digits.slice(4);
+
+    if (digits.length === 12) {
+      // add missing 9
+      candidates.add("55" + ddd + "9" + rest);
+    }
+
+    if (digits.length === 13 && rest.startsWith("9")) {
+      // remove extra 9
+      candidates.add("55" + ddd + rest.slice(1));
+    }
+  }
+
+  return Array.from(candidates);
+}
+
 async function sendTemplateMessage({ to, templateName, lang = "pt_BR", params = [] }) {
   const url = `https://graph.facebook.com/${process.env.WA_API_VERSION}/${process.env.WA_PHONE_NUMBER_ID}/messages`;
 
@@ -179,7 +213,8 @@ app.post("/webhook", async (req, res) => {
       const text = msg.text?.body?.trim()?.toLowerCase();
 
       if (text && ["sair", "parar", "cancelar", "stop"].includes(text)) {
-        await pool.query(`update contacts set opt_in = false where phone_e164 = $1`, [from]);
+        const candidates = buildPhoneCandidatesBR(from);
+        await pool.query(`update contacts set opt_in = false where phone_e164 = any($1)`, [candidates]);
       }
     }
 
