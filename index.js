@@ -107,6 +107,25 @@ async function sendTemplateMessage({ to, templateName, lang = "pt_BR", params = 
   return res.data;
 }
 
+async function sendTextMessage({ to, text }) {
+  const url = `https://graph.facebook.com/${process.env.WA_API_VERSION}/${process.env.WA_PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: text },
+  };
+
+  const res = await axios.post(url, payload, {
+    headers: {
+      Authorization: `Bearer ${process.env.WA_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  return res.data;
+}
+
 const QUEUE_BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE || 20);
 const QUEUE_MAX_ATTEMPTS = Number(process.env.QUEUE_MAX_ATTEMPTS || 3);
 const QUEUE_POLL_INTERVAL_MS = Number(process.env.QUEUE_POLL_INTERVAL_MS || 1000);
@@ -320,23 +339,8 @@ app.post("/leads", async (req, res) => {
 
     const contact = upsert.rows[0];
 
-    // manda template boas_vindas (precisa existir e estar aprovado)
-    const wa = await sendTemplateMessage({
-      to: contact.phone_e164,
-      templateName: "interesse_cupom",
-      params: [contact.name, eventName],
-    });
-
-    // registra mensagem
-    await pool.query(
-      `
-      insert into messages (contact_id, status, wa_message_id, sent_at)
-      values ($1, $2, $3, now())
-      `,
-      [contact.id, "sent", wa.messages?.[0]?.id || null]
-    );
-
-    res.json({ ok: true, contact, wa });
+    // Não inicia conversa aqui (fluxo novo). Apenas salva.
+    res.json({ ok: true, contact });
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(500).json({ error: "erro ao salvar/enviar", details: err.response?.data || err.message });
@@ -409,6 +413,7 @@ app.post("/webhook", async (req, res) => {
       const text = msg.text?.body?.trim()?.toLowerCase();
       const buttonTitle = msg.interactive?.button_reply?.title?.trim()?.toLowerCase();
       const isYes = buttonTitle && buttonTitle.startsWith("sim");
+      const isYesText = text === "sim" || text === "s" || text === "ok";
 
       if (text && ["sair", "parar", "cancelar", "stop"].includes(text)) {
         const candidates = buildPhoneCandidatesBR(from);
@@ -416,7 +421,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      if (isYes) {
+      if (isYes || isYesText) {
         const candidates = buildPhoneCandidatesBR(from);
         const settings = await getSettings();
         const result = await pool.query(
@@ -431,7 +436,25 @@ app.post("/webhook", async (req, res) => {
             params: [contactName, settings.coupon_code],
           });
         }
+        return res.sendStatus(200);
       }
+
+      // Primeira mensagem do cliente: salva/atualiza contato e responde perguntando do cupom
+      const settings = await getSettings();
+      const eventName = settings?.event_name || "evento";
+      await pool.query(
+        `
+        insert into contacts (name, phone_e164, opt_in, opt_in_at, coupon_status, source)
+        values ($1, $2, true, now(), 'pending', $3)
+        on conflict (phone_e164)
+        do update set opt_in = true, opt_in_at = now(), coupon_status = 'pending'
+        `,
+        [changes?.contacts?.[0]?.profile?.name || "cliente", from, "whatsapp"]
+      );
+      await sendTextMessage({
+        to: from,
+        text: `Oi! Vi que você se interessou nas fotos da ${eventName}. Quer receber seu cupom? Responda SIM.`,
+      });
     }
 
     res.sendStatus(200);
