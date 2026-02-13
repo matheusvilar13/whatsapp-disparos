@@ -12,7 +12,7 @@
       .main { display: flex; flex-direction: column; }
       .header { background: #fff; border-bottom: 1px solid #eee; padding: 12px; }
       .messages { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
-      .msg { max-width: 70%; padding: 10px 12px; border-radius: 10px; font-size: 14px; }
+      .msg { max-width: 70%; padding: 10px 12px; border-radius: 10px; font-size: 14px; white-space: pre-wrap; }
       .msg.in { align-self: flex-start; background: #fff; border: 1px solid #eee; }
       .msg.out { align-self: flex-end; background: #daf0ff; }
       .contact { padding: 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
@@ -20,6 +20,9 @@
       .contact.active { background: #e9f3ff; }
       .muted { color: #777; font-size: 12px; }
       .search { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 10px; }
+      .composer { background: #fff; border-top: 1px solid #eee; padding: 10px; display: flex; gap: 8px; }
+      .composer textarea { flex: 1; resize: none; padding: 10px; border: 1px solid #ddd; border-radius: 8px; height: 60px; }
+      .composer button { padding: 10px 14px; border: 0; border-radius: 8px; background: #0a7cff; color: #fff; font-weight: 700; cursor: pointer; }
     </style>
   </head>
   <body>
@@ -34,6 +37,10 @@
           <div id="contactPhone" class="muted"></div>
         </div>
         <div id="messages" class="messages"></div>
+        <div class="composer">
+          <textarea id="msgText" placeholder="Digite sua mensagem..."></textarea>
+          <button id="sendBtn">Enviar</button>
+        </div>
       </div>
     </div>
 
@@ -43,6 +50,8 @@
       const contactNameEl = document.getElementById("contactName");
       const contactPhoneEl = document.getElementById("contactPhone");
       const qEl = document.getElementById("q");
+      const msgTextEl = document.getElementById("msgText");
+      const sendBtn = document.getElementById("sendBtn");
       let activeId = null;
 
       async function loadContacts() {
@@ -85,9 +94,32 @@
         loadContacts();
       }
 
+      async function sendMessage() {
+        if (!activeId) return alert("Selecione um contato primeiro");
+        const text = msgTextEl.value.trim();
+        if (!text) return;
+        sendBtn.disabled = true;
+        try {
+          const res = await fetch(`/admin/chats/${activeId}/send`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Erro ao enviar");
+          msgTextEl.value = "";
+          await loadMessages(activeId);
+        } catch (err) {
+          alert(err.message);
+        } finally {
+          sendBtn.disabled = false;
+        }
+      }
+
       qEl.addEventListener("input", () => {
         loadContacts();
       });
+      sendBtn.addEventListener("click", sendMessage);
 
       loadContacts();
       setInterval(() => {

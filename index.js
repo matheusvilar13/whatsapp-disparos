@@ -346,6 +346,28 @@ app.get("/admin/chats/:contact_id", async (req, res) => {
   }
 });
 
+app.post("/admin/chats/:contact_id/send", async (req, res) => {
+  try {
+    const { text } = req.body || {};
+    if (!text || !text.trim()) return res.status(400).json({ error: "texto obrigatório" });
+
+    const contactRes = await pool.query(`select phone_e164 from contacts where id = $1`, [req.params.contact_id]);
+    const phone = contactRes.rows[0]?.phone_e164;
+    if (!phone) return res.status(404).json({ error: "contato não encontrado" });
+
+    const wa = await sendTextMessage({ to: phone, text: text.trim() });
+    await logChatMessage({
+      contact_id: req.params.contact_id,
+      direction: "out",
+      body: text.trim(),
+      wa_message_id: wa?.messages?.[0]?.id || null,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
+
 app.post("/admin/send-link", async (_, res) => {
   try {
     const settings = await getSettings();
