@@ -25,6 +25,16 @@
       .composer textarea { flex: 1; resize: none; padding: 10px; border: 1px solid #ddd; border-radius: 8px; height: 60px; }
       .composer button { padding: 10px 14px; border: 0; border-radius: 8px; background: #0a7cff; color: #fff; font-weight: 700; cursor: pointer; }
       .window-status { font-size: 12px; color: #35514a; }
+      @media (max-width: 900px) {
+        .layout { grid-template-columns: 1fr; }
+        .sidebar { height: 40vh; }
+        .main { height: 60vh; }
+      }
+      @media (max-width: 600px) {
+        .messages { padding: 12px; }
+        .msg { max-width: 85%; }
+        .composer textarea { height: 52px; }
+      }
     </style>
   </head>
   <body>
