@@ -235,7 +235,7 @@ app.post("/campaigns/:id/send", async (req, res) => {
     const contacts = await pool.query(`select * from contacts where opt_in = true`);
 
     for (const c of contacts.rows) {
-      const params = [c.name, c.source || "campanha", "https://seu-link-aqui.com"];
+      const params = [c.name, "https://seu-link-aqui.com"];
       await pool.query(
         `
         insert into messages (contact_id, campaign_id, template_name, template_lang, params, status)
