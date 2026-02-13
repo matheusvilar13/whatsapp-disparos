@@ -526,15 +526,15 @@ app.post("/webhook", async (req, res) => {
         const contactName = result.rows[0]?.name || changes?.contacts?.[0]?.profile?.name || "cliente";
         const contactId = result.rows[0]?.id;
         if (settings?.coupon_code) {
-          const wa = await sendTemplateMessage({
+          const textMsg = `Perfeito, ${contactName}! Seu cupom é: ${settings.coupon_code}. Quando as fotos estiverem disponíveis, enviaremos o link por aqui.`;
+          const wa = await sendTextMessage({
             to: result.rows[0]?.phone_e164 || from,
-            templateName: "envio_cupom",
-            params: [contactName, settings.coupon_code],
+            text: textMsg,
           });
           await logChatMessage({
             contact_id: contactId,
             direction: "out",
-            body: `template: envio_cupom | params: ${contactName}, ${settings.coupon_code}`,
+            body: textMsg,
             wa_message_id: wa?.messages?.[0]?.id || null,
           });
         }
