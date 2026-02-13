@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const { Pool } = require("pg");
+const { Queue } = require("bullmq");
 
 const app = express();
 app.use(express.json());
@@ -9,6 +10,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const queue = new Queue("campaign-send", {
+  connection: { url: process.env.REDIS_URL },
+});
 
 function normalizePhoneBR(input) {
   // Mantém só números
@@ -62,14 +66,16 @@ async function sendTemplateMessage({ to, templateName, lang = "pt_BR", params = 
     template: {
       name: templateName,
       language: { code: lang },
-      components: [
-        {
-          type: "body",
-          parameters: params.map((text) => ({ type: "text", text })),
-        },
-      ],
     },
   };
+  if (params.length > 0) {
+    payload.template.components = [
+      {
+        type: "body",
+        parameters: params.map((text) => ({ type: "text", text })),
+      },
+    ];
+  }
 
   const res = await axios.post(url, payload, {
     headers: {
@@ -150,38 +156,22 @@ app.post("/campaigns/:id/send", async (req, res) => {
     const campaign = camp.rows[0];
 
     const contacts = await pool.query(`select * from contacts where opt_in = true`);
-    const sent = [];
-    const failed = [];
+    const jobs = [];
 
     for (const c of contacts.rows) {
-      try {
-        const wa = await sendTemplateMessage({
-          to: c.phone_e164,
-          templateName: campaign.template_name,
-          lang: campaign.template_lang,
-          params: [c.name, c.source || "campanha", "https://seu-link-aqui.com"],
-        });
-
-        await pool.query(
-          `insert into messages (contact_id, campaign_id, status, wa_message_id, sent_at) values ($1,$2,$3,$4,now())`,
-          [c.id, campaign.id, "sent", wa.messages?.[0]?.id || null]
-        );
-
-        sent.push(c.phone_e164);
-
-        // controle simples de velocidade (1 msg/seg)
-        await new Promise((r) => setTimeout(r, 1000));
-      } catch (e) {
-        console.error("Falha envio:", c.phone_e164, e.response?.data || e.message);
-        failed.push(c.phone_e164);
-        await pool.query(
-          `insert into messages (contact_id, campaign_id, status, error) values ($1,$2,$3,$4)`,
-          [c.id, campaign.id, "failed", JSON.stringify(e.response?.data || e.message)]
-        );
-      }
+      const params = [c.name, c.source || "campanha", "https://seu-link-aqui.com"];
+      const job = await queue.add("send", {
+        contact_id: c.id,
+        phone_e164: c.phone_e164,
+        campaign_id: campaign.id,
+        template_name: campaign.template_name,
+        template_lang: campaign.template_lang,
+        params,
+      });
+      jobs.push(job.id);
     }
 
-    res.json({ ok: true, total: contacts.rowCount, sent: sent.length, failed: failed.length, failed_list: failed });
+    res.json({ ok: true, total: contacts.rowCount, queued: jobs.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
