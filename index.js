@@ -2,7 +2,6 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const { Pool } = require("pg");
-const { Queue } = require("bullmq");
 
 const app = express();
 app.use(express.json());
@@ -10,9 +9,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const queue = new Queue("campaign-send", {
-  connection: { url: process.env.REDIS_URL },
-});
 
 function normalizePhoneBR(input) {
   // Mantém só números
@@ -156,22 +152,19 @@ app.post("/campaigns/:id/send", async (req, res) => {
     const campaign = camp.rows[0];
 
     const contacts = await pool.query(`select * from contacts where opt_in = true`);
-    const jobs = [];
 
     for (const c of contacts.rows) {
       const params = [c.name, c.source || "campanha", "https://seu-link-aqui.com"];
-      const job = await queue.add("send", {
-        contact_id: c.id,
-        phone_e164: c.phone_e164,
-        campaign_id: campaign.id,
-        template_name: campaign.template_name,
-        template_lang: campaign.template_lang,
-        params,
-      });
-      jobs.push(job.id);
+      await pool.query(
+        `
+        insert into messages (contact_id, campaign_id, template_name, template_lang, params, status)
+        values ($1, $2, $3, $4, $5, 'queued')
+        `,
+        [c.id, campaign.id, campaign.template_name, campaign.template_lang, JSON.stringify(params)]
+      );
     }
 
-    res.json({ ok: true, total: contacts.rowCount, queued: jobs.length });
+    res.json({ ok: true, total: contacts.rowCount, queued: contacts.rowCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -22,9 +22,15 @@ create table if not exists messages (
   id uuid primary key default uuid_generate_v4(),
   contact_id uuid references contacts(id) on delete cascade,
   campaign_id uuid references campaigns(id) on delete set null,
+  template_name text,
+  template_lang text,
+  params jsonb,
   wa_message_id text,
   status text not null default 'queued',
   error text,
+  attempt_count integer not null default 0,
+  last_attempt_at timestamptz,
+  locked_at timestamptz,
   created_at timestamptz not null default now(),
   sent_at timestamptz
 );
@@ -32,4 +38,3 @@ create table if not exists messages (
 create index if not exists idx_contacts_optin on contacts(opt_in);
 create index if not exists idx_messages_contact on messages(contact_id);
 create index if not exists idx_messages_status on messages(status);
-
