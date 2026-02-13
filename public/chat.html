@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chat - WhatsApp</title>
+    <style>
+      :root { color-scheme: light; }
+      body { font-family: Arial, sans-serif; margin: 0; background: #f6f7fb; }
+      .layout { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+      .sidebar { background: #fff; border-right: 1px solid #eee; padding: 12px; overflow: auto; }
+      .main { display: flex; flex-direction: column; }
+      .header { background: #fff; border-bottom: 1px solid #eee; padding: 12px; }
+      .messages { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+      .msg { max-width: 70%; padding: 10px 12px; border-radius: 10px; font-size: 14px; }
+      .msg.in { align-self: flex-start; background: #fff; border: 1px solid #eee; }
+      .msg.out { align-self: flex-end; background: #daf0ff; }
+      .contact { padding: 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
+      .contact:hover { background: #f7f7f7; }
+      .contact.active { background: #e9f3ff; }
+      .muted { color: #777; font-size: 12px; }
+      .search { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 10px; }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <div class="sidebar">
+        <input id="q" class="search" placeholder="Buscar contato" />
+        <div id="contactList"></div>
+      </div>
+      <div class="main">
+        <div class="header">
+          <strong id="contactName">Selecione um contato</strong>
+          <div id="contactPhone" class="muted"></div>
+        </div>
+        <div id="messages" class="messages"></div>
+      </div>
+    </div>
+
+    <script>
+      const contactList = document.getElementById("contactList");
+      const messagesEl = document.getElementById("messages");
+      const contactNameEl = document.getElementById("contactName");
+      const contactPhoneEl = document.getElementById("contactPhone");
+      const qEl = document.getElementById("q");
+      let activeId = null;
+
+      async function loadContacts() {
+        const params = new URLSearchParams();
+        if (qEl.value.trim()) params.set("q", qEl.value.trim());
+        const res = await fetch(`/admin/chats?${params.toString()}`);
+        const data = await res.json();
+        contactList.innerHTML = "";
+        data.forEach((c) => {
+          const div = document.createElement("div");
+          div.className = "contact" + (c.id === activeId ? " active" : "");
+          div.innerHTML = `
+            <div><strong>${c.name || "Sem nome"}</strong></div>
+            <div class="muted">${c.phone_e164 || ""}</div>
+            <div class="muted">${c.last_message || ""}</div>
+          `;
+          div.onclick = () => selectContact(c);
+          contactList.appendChild(div);
+        });
+      }
+
+      async function loadMessages(contactId) {
+        const res = await fetch(`/admin/chats/${contactId}`);
+        const data = await res.json();
+        messagesEl.innerHTML = "";
+        data.forEach((m) => {
+          const div = document.createElement("div");
+          div.className = `msg ${m.direction}`;
+          div.textContent = m.body || "";
+          messagesEl.appendChild(div);
+        });
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      function selectContact(c) {
+        activeId = c.id;
+        contactNameEl.textContent = c.name || "Sem nome";
+        contactPhoneEl.textContent = c.phone_e164 || "";
+        loadMessages(c.id);
+        loadContacts();
+      }
+
+      qEl.addEventListener("input", () => {
+        loadContacts();
+      });
+
+      loadContacts();
+      setInterval(() => {
+        if (activeId) loadMessages(activeId);
+        loadContacts();
+      }, 5000);
+    </script>
+  </body>
+</html>

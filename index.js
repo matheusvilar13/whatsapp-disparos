@@ -126,6 +126,14 @@ async function sendTextMessage({ to, text }) {
   return res.data;
 }
 
+async function logChatMessage({ contact_id, direction, body, wa_message_id }) {
+  if (!contact_id) return;
+  await pool.query(
+    `insert into chat_messages (contact_id, direction, body, wa_message_id) values ($1,$2,$3,$4)`,
+    [contact_id, direction, body || null, wa_message_id || null]
+  );
+}
+
 const QUEUE_BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE || 20);
 const QUEUE_MAX_ATTEMPTS = Number(process.env.QUEUE_MAX_ATTEMPTS || 3);
 const QUEUE_POLL_INTERVAL_MS = Number(process.env.QUEUE_POLL_INTERVAL_MS || 1000);
@@ -279,6 +287,65 @@ app.delete("/admin/contacts/:id", async (req, res) => {
   }
 });
 
+app.get("/admin/chats", async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    const params = [];
+    let where = "1=1";
+    if (q) {
+      params.push(`%${q}%`);
+      where += ` and (c.name ilike $${params.length} or c.phone_e164 ilike $${params.length})`;
+    }
+
+    const result = await pool.query(
+      `
+      select
+        c.id,
+        c.name,
+        c.phone_e164,
+        c.opt_in,
+        c.created_at,
+        cm.body as last_message,
+        cm.created_at as last_message_at,
+        cm.direction as last_direction
+      from contacts c
+      left join lateral (
+        select body, created_at, direction
+        from chat_messages
+        where contact_id = c.id
+        order by created_at desc
+        limit 1
+      ) cm on true
+      where ${where}
+      order by cm.created_at desc nulls last, c.created_at desc
+      limit 500
+      `,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/chats/:contact_id", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      select id, direction, body, wa_message_id, created_at
+      from chat_messages
+      where contact_id = $1
+      order by created_at asc
+      limit 500
+      `,
+      [req.params.contact_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/admin/send-link", async (_, res) => {
   try {
     const settings = await getSettings();
@@ -425,15 +492,22 @@ app.post("/webhook", async (req, res) => {
         const candidates = buildPhoneCandidatesBR(from);
         const settings = await getSettings();
         const result = await pool.query(
-          `update contacts set coupon_status = 'accepted' where phone_e164 = any($1) returning name, phone_e164`,
+          `update contacts set coupon_status = 'accepted' where phone_e164 = any($1) returning name, phone_e164, id`,
           [candidates]
         );
         const contactName = result.rows[0]?.name || changes?.contacts?.[0]?.profile?.name || "cliente";
+        const contactId = result.rows[0]?.id;
         if (settings?.coupon_code) {
-          await sendTemplateMessage({
+          const wa = await sendTemplateMessage({
             to: result.rows[0]?.phone_e164 || from,
             templateName: "envio_cupom",
             params: [contactName, settings.coupon_code],
+          });
+          await logChatMessage({
+            contact_id: contactId,
+            direction: "out",
+            body: `template: envio_cupom | params: ${contactName}, ${settings.coupon_code}`,
+            wa_message_id: wa?.messages?.[0]?.id || null,
           });
         }
         return res.sendStatus(200);
@@ -442,18 +516,31 @@ app.post("/webhook", async (req, res) => {
       // Primeira mensagem do cliente: salva/atualiza contato e responde perguntando do cupom
       const settings = await getSettings();
       const eventName = settings?.event_name || "evento";
-      await pool.query(
+      const upsert = await pool.query(
         `
         insert into contacts (name, phone_e164, opt_in, opt_in_at, coupon_status, source)
         values ($1, $2, true, now(), 'pending', $3)
         on conflict (phone_e164)
         do update set opt_in = true, opt_in_at = now(), coupon_status = 'pending'
+        returning id
         `,
         [changes?.contacts?.[0]?.profile?.name || "cliente", from, "whatsapp"]
       );
+      const contactId = upsert.rows[0]?.id;
+      await logChatMessage({
+        contact_id: contactId,
+        direction: "in",
+        body: msg.text?.body || "[mensagem]",
+        wa_message_id: msg.id,
+      });
       await sendTextMessage({
         to: from,
         text: `Oi! Vi que você se interessou nas fotos da ${eventName}. Quer receber seu cupom? Responda SIM.`,
+      });
+      await logChatMessage({
+        contact_id: contactId,
+        direction: "out",
+        body: `Oi! Vi que você se interessou nas fotos da ${eventName}. Quer receber seu cupom? Responda SIM.`,
       });
     }
 

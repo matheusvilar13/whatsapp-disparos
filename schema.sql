@@ -47,3 +47,15 @@ create table if not exists app_settings (
   photos_link text,
   updated_at timestamptz not null default now()
 );
+
+create table if not exists chat_messages (
+  id uuid primary key default uuid_generate_v4(),
+  contact_id uuid references contacts(id) on delete cascade,
+  direction text not null, -- 'in' | 'out'
+  body text,
+  wa_message_id text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_chat_messages_contact on chat_messages(contact_id);
+create index if not exists idx_chat_messages_created_at on chat_messages(created_at);
