@@ -7,6 +7,8 @@ create table if not exists contacts (
   opt_in boolean not null default true,
   opt_in_at timestamptz not null default now(),
   coupon_status text not null default 'pending',
+  first_inbound_at timestamptz,
+  last_inbound_at timestamptz,
   source text,
   created_at timestamptz not null default now()
 );

@@ -304,6 +304,8 @@ app.get("/admin/chats", async (req, res) => {
         c.name,
         c.phone_e164,
         c.opt_in,
+        c.first_inbound_at,
+        c.last_inbound_at,
         c.created_at,
         cm.body as last_message,
         cm.created_at as last_message_at,
@@ -330,6 +332,10 @@ app.get("/admin/chats", async (req, res) => {
 
 app.get("/admin/chats/:contact_id", async (req, res) => {
   try {
+    const contact = await pool.query(
+      `select id, name, phone_e164, first_inbound_at, last_inbound_at from contacts where id = $1`,
+      [req.params.contact_id]
+    );
     const result = await pool.query(
       `
       select id, direction, body, wa_message_id, created_at
@@ -340,7 +346,7 @@ app.get("/admin/chats/:contact_id", async (req, res) => {
       `,
       [req.params.contact_id]
     );
-    res.json(result.rows);
+    res.json({ contact: contact.rows[0] || null, messages: result.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -544,11 +550,21 @@ app.post("/webhook", async (req, res) => {
         values ($1, $2, true, now(), 'pending', $3)
         on conflict (phone_e164)
         do update set opt_in = true, opt_in_at = now(), coupon_status = 'pending'
-        returning id
+        returning id, first_inbound_at, last_inbound_at
         `,
         [changes?.contacts?.[0]?.profile?.name || "cliente", from, "whatsapp"]
       );
       const contactId = upsert.rows[0]?.id;
+      await pool.query(
+        `
+        update contacts
+        set
+          first_inbound_at = coalesce(first_inbound_at, now()),
+          last_inbound_at = now()
+        where id = $1
+        `,
+        [contactId]
+      );
       await logChatMessage({
         contact_id: contactId,
         direction: "in",
