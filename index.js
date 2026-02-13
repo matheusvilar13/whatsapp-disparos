@@ -83,6 +83,87 @@ async function sendTemplateMessage({ to, templateName, lang = "pt_BR", params = 
   return res.data;
 }
 
+const QUEUE_BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE || 20);
+const QUEUE_MAX_ATTEMPTS = Number(process.env.QUEUE_MAX_ATTEMPTS || 3);
+const QUEUE_POLL_INTERVAL_MS = Number(process.env.QUEUE_POLL_INTERVAL_MS || 1000);
+
+async function fetchQueuedBatch(limit) {
+  const result = await pool.query(
+    `
+    with cte as (
+      select m.id
+      from messages m
+      where m.status = 'queued'
+      order by m.created_at
+      limit $1
+      for update skip locked
+    )
+    update messages m
+    set status = 'processing', locked_at = now(), last_attempt_at = now()
+    from cte
+    where m.id = cte.id
+    returning m.*
+    `,
+    [limit]
+  );
+  return result.rows;
+}
+
+async function processQueuedMessage(msg) {
+  const contactRes = await pool.query(`select phone_e164 from contacts where id = $1`, [msg.contact_id]);
+  const phone_e164 = contactRes.rows[0]?.phone_e164;
+  if (!phone_e164) {
+    throw new Error("contact not found for message");
+  }
+
+  const params = Array.isArray(msg.params) ? msg.params : msg.params ? JSON.parse(msg.params) : [];
+  const wa = await sendTemplateMessage({
+    to: phone_e164,
+    templateName: msg.template_name,
+    lang: msg.template_lang,
+    params,
+  });
+
+  await pool.query(
+    `update messages set status = 'sent', wa_message_id = $1, sent_at = now() where id = $2`,
+    [wa.messages?.[0]?.id || null, msg.id]
+  );
+}
+
+async function handleQueueFailure(msg, err) {
+  const attempts = Number(msg.attempt_count || 0) + 1;
+  const errorText = JSON.stringify(err?.response?.data || err?.message || err);
+
+  if (attempts >= QUEUE_MAX_ATTEMPTS) {
+    await pool.query(
+      `update messages set status = 'failed', attempt_count = $1, error = $2 where id = $3`,
+      [attempts, errorText, msg.id]
+    );
+  } else {
+    await pool.query(
+      `update messages set status = 'queued', attempt_count = $1, error = $2 where id = $3`,
+      [attempts, errorText, msg.id]
+    );
+  }
+}
+
+async function queuePollLoop() {
+  try {
+    const batch = await fetchQueuedBatch(QUEUE_BATCH_SIZE);
+    for (const msg of batch) {
+      try {
+        await processQueuedMessage(msg);
+        // rate limit: 1 msg/seg
+        await new Promise((r) => setTimeout(r, 1000));
+      } catch (err) {
+        await handleQueueFailure(msg, err);
+      }
+    }
+  } catch (err) {
+    console.error("queue worker error:", err.message || err);
+  }
+}
+
 // 1) Captura lead: salva + manda boas-vindas
 app.post("/leads", async (req, res) => {
   try {
@@ -211,4 +292,10 @@ app.post("/webhook", async (req, res) => {
 app.get("/", (_, res) => res.send("API WhatsApp ok"));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`rodando em http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`rodando em http://localhost:${PORT}`);
+  if (process.env.RUN_WORKER_IN_API === "true") {
+    setInterval(queuePollLoop, QUEUE_POLL_INTERVAL_MS);
+    console.log("queue worker ativo dentro da API");
+  }
+});
